@@ -1,0 +1,15 @@
+pkgname=phonemic
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Low-latency iPhone microphone receiver for PipeWire'
+arch=('x86_64' 'aarch64')
+license=('MIT')
+depends=('pipewire')
+makedepends=('cmake' 'gcc' 'pkgconf')
+# Local package: run makepkg -si here in the full source checkout.
+build() {
+  cmake -S "$startdir/../.." -B "$srcdir/build" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+  cmake --build "$srcdir/build" --parallel
+}
+check() { ctest --test-dir "$srcdir/build" --output-on-failure; }
+package() { DESTDIR="$pkgdir" cmake --install "$srcdir/build"; install -Dm644 "$startdir/../../LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"; }
