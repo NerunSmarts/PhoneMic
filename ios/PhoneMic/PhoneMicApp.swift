@@ -1,6 +1,7 @@
 import SwiftUI
 import AVFAudio
 import Combine
+import Darwin
 
 // Explicit actor isolation keeps every bridge operation, including activation,
 // deactivation, and route queries, serialized on a background executor. Never
@@ -30,6 +31,26 @@ final class MicrophoneModel: ObservableObject {
     var connected: Bool { stats["connected"]?.boolValue ?? false }
     var estimatedMS: Double {
         value("input") + value("buffer") + 5 + value("rtt") / 2 + value("queue") + value("quantum") / 48
+    }
+    var connectionHint: String {
+        let code = Int32(value("socketErrno"))
+        if code != 0, value("socketErrorAge") < 5 {
+            let detail = String(cString: strerror(code))
+            switch code {
+            case EACCES, EPERM:
+                return "iOS blocked UDP access (\(detail), errno \(code)). Enable Local Network for PhoneMic in Settings."
+            case EHOSTUNREACH, ENETUNREACH, EHOSTDOWN, ENETDOWN, EADDRNOTAVAIL:
+                return "Wi-Fi cannot reach the PC (\(detail), errno \(code)). Check its LAN address, Wi-Fi/VPN routing, and Local Network permission."
+            case ECONNREFUSED:
+                return "The PC rejected the UDP connection. Start the receiver and check its port and firewall."
+            default:
+                return "UDP error: \(detail) (errno \(code)). Check the receiver address and LAN connection."
+            }
+        }
+        if value("uptime") >= 5 {
+            return "No receiver acknowledgement. Check the current pairing code and UDP port. The PC's UDP / wrong-code counters show whether packets arrived."
+        }
+        return "Contacting the receiver. Allow Local Network access if iOS asks."
     }
     func start(host: String, port: String, code: String) async {
         guard !running, !starting, !stopping else { return }
@@ -221,11 +242,20 @@ struct MicrophoneView: View {
                 Text("Estimate uses half the network RTT and reported buffers. It excludes the game's input buffering. Measure the acoustic loop with the Linux calibration tool.")
                     .font(.footnote).foregroundStyle(.secondary)
             } else {
-                Text("Check the PC address, pairing code, local network permission, and UDP firewall rule. The receiver must be running.")
+                LabeledContent("Connecting to", value: "\(host):\(port)")
+                Text(model.connectionHint)
                     .font(.footnote).foregroundStyle(.secondary)
             }
             LabeledContent("Packets sent", value: "\(Int(model.value("packets")))")
+            LabeledContent("Probes sent / replies received", value: "\(Int(model.value("pingsSent"))) / \(Int(model.value("datagramsReceived")))")
             LabeledContent("Local drops / send errors", value: "\(Int(model.value("drops"))) / \(Int(model.value("sendErrors")))")
+            if model.value("receiveErrors") > 0 {
+                LabeledContent("UDP receive errors", value: "\(Int(model.value("receiveErrors")))")
+            }
+            if model.value("uptime") >= 5, model.value("capturedFrames") == 0 {
+                Text("No microphone samples captured. Stop and reconnect; network probes run independently of audio capture.")
+                    .font(.footnote).foregroundStyle(.orange)
+            }
             if model.value("audioErrors") > 0 {
                 Text("Capture errors: \(Int(model.value("audioErrors"))). Stop and reconnect.")
                     .font(.footnote).foregroundStyle(.orange)

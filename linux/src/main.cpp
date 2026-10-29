@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cerrno>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -56,18 +57,24 @@ static void network(Receiver& r, int fd, uint64_t token) {
     std::array<uint8_t, pm::packetSize + 1> packet{};
     sockaddr_in peer{};
     bool paired = false;
+    uint64_t udp = 0, malformed = 0, wrongCode = 0, busy = 0, replyErrors = 0;
     auto lastPeer = Clock::now(), lastPrint = Clock::now();
     while (r.running.load()) {
         pollfd pfd{fd, POLLIN, 0};
         int result = poll(&pfd, 1, 50);
-        if (result > 0 && (pfd.revents & POLLIN)) {
+        // Keep rejected traffic visible without printing pairing tokens. A UDP
+        // packet reaching this socket is distinct from an authenticated stream.
+        auto receiveOne = [&] {
             sockaddr_in source{}; socklen_t length = sizeof(source);
             auto n = recvfrom(fd, packet.data(), packet.size(), 0, reinterpret_cast<sockaddr*>(&source), &length);
             pm::Header h{};
-            if (n < 0 || !pm::decode(packet.data(), size_t(n), h) || h.token != token || h.type == pm::Type::pong) continue;
+            if (n < 0) return;
+            ++udp;
+            if (!pm::decode(packet.data(), size_t(n), h) || h.type == pm::Type::pong) { ++malformed; return; }
+            if (h.token != token) { ++wrongCode; return; }
             auto now = Clock::now();
             bool same = paired && source.sin_addr.s_addr == peer.sin_addr.s_addr && source.sin_port == peer.sin_port;
-            if (paired && !same && now - lastPeer < std::chrono::seconds(3)) continue;
+            if (paired && !same && now - lastPeer < std::chrono::seconds(3)) { ++busy; return; }
             if (!same || now - lastPeer >= std::chrono::seconds(3)) {
                 r.audio.newSession(); peer = source; paired = true;
                 std::cout << "\nPhone connected: " << inet_ntoa(source.sin_addr) << '\n';
@@ -83,15 +90,20 @@ static void network(Receiver& r, int fd, uint64_t token) {
                 pm::put32(response.data() + 44, r.audio.late.load());
                 pm::put32(response.data() + 48, r.quantum.load());
                 pm::put32(response.data() + 52, r.audio.received.load());
-                sendto(fd, response.data(), response.size(), 0, reinterpret_cast<sockaddr*>(&source), length);
+                if (sendto(fd, response.data(), response.size(), 0, reinterpret_cast<sockaddr*>(&source), length) != ssize_t(response.size())) {
+                    if (replyErrors++ == 0) std::cerr << "\nUDP acknowledgement failed: " << std::strerror(errno) << '\n';
+                }
             }
-        }
+        };
+        if (result > 0 && (pfd.revents & POLLIN)) receiveOne();
         if (Clock::now() - lastPrint >= std::chrono::seconds(2)) {
             std::cout << "\r" << (paired && Clock::now() - lastPeer < std::chrono::seconds(3) ? "Receiving" : "Waiting  ")
                       << " | queue " << std::fixed << std::setprecision(1) << r.audio.queued() / 48.0
                       << " ms | quantum " << r.quantum.load() << " | gaps " << r.audio.lost.load()
                       << " | late " << r.audio.late.load() << " | underruns " << r.audio.underruns.load()
-                      << " | trims " << r.audio.trims.load() << "    " << std::flush;
+                      << " | trims " << r.audio.trims.load()
+                      << " | UDP " << udp << " | wrong-code " << wrongCode << " | malformed " << malformed
+                      << " | other-sender " << busy << " | reply-errors " << replyErrors << "    " << std::flush;
             lastPrint = Clock::now();
         }
     }
@@ -164,7 +176,7 @@ int main(int argc, char** argv) {
             pw_stream_destroy(r.stream); pw_main_loop_destroy(r.loop); close(fd); pw_deinit();
             throw std::runtime_error("PipeWire stream connection failed");
         }
-        std::cout << "PhoneMic on " << bindAddress << ":" << port << " (UDP)\nPairing code: "
+        std::cout << "PhoneMic receiver — UDP listening on " << bindAddress << ":" << port << "\nPairing code: "
                   << std::hex << std::setfill('0') << std::setw(16) << token << std::dec << std::setfill(' ')
                   << "\nJitter target: " << jitter << " ms. Find this PC's LAN IP with: hostname -I\n"
                   << "Select PhoneMic in your game/audio settings. Ctrl-C stops it.\n";

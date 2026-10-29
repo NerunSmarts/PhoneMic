@@ -37,7 +37,61 @@ If you run a firewall, permit UDP 5555 **from your phone/LAN only**. Router clie
 isolation and guest Wi-Fi can block phone-to-PC traffic. Do not forward this port
 from the internet.
 
-Options:
+CachyOS normally [enables UFW during installation](https://wiki.cachyos.org/configuration/post_install_setup/). Check `sudo ufw status verbose`.
+If it is active, allow only the phone's address to the receiver port (replace the
+example phone address with the one in iOS Settings → Wi-Fi → your network):
+
+```sh
+sudo ufw allow from 192.168.1.123 to any port 5555 proto udp comment 'PhoneMic iPhone'
+```
+
+The receiver's `0.0.0.0` is a listening address, not the PC address to enter in the
+app. Use its actual LAN address. A successful UDP send only means the local OS
+accepted the packet; it does not prove delivery to the PC.
+
+### If both sides stay on “Waiting”
+
+First, keep the receiver running in one terminal and check its socket in another:
+
+```sh
+sudo ss -lunp 'sport = :5555'
+```
+
+There should be a UDP `UNCONN` row with `0.0.0.0:5555` (or the selected bind address)
+and the `phonemic` process. UDP does not show a TCP-style `LISTEN` state. If the
+output is empty, there is no receiver bound to that port in this network namespace:
+check its startup command, selected port, and whether it exited with an error.
+
+The iOS diagnostics show audio packets, independent connection probes, returned
+datagrams, and the most recent socket error with its numeric errno. Xcode messages
+prefixed `PhoneMic UDP` include the selected local/remote address and actual network
+errors. Keyboard / PointerUI diagnostics do not establish a UDP failure.
+
+The receiver separately shows `UDP` (all datagrams), `wrong-code`, `malformed`,
+`other-sender`, and `reply-errors` counters. If `UDP` stays zero, check the address,
+firewall, and Wi-Fi client isolation. If `wrong-code` grows, stop streaming and copy
+the code from the current receiver process; it changes on every receiver restart.
+`other-sender` means another endpoint is paired: stop both clients and wait three
+seconds. Local Network permission controls are in iOS Settings → Privacy & Security
+→ Local Network when iOS has registered a request. No general API can read or reset
+this permission; absence of a prompt alone does not establish the network error.
+See [Apple's local network privacy notes](https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy).
+
+Test UDP and pairing independently of iPhone audio with the standard-library probe:
+
+```sh
+# On the Linux PC itself (temporarily stop the phone and wait 3 seconds first):
+python tools/probe_receiver.py 127.0.0.1
+# From another computer on the LAN; use your PC's actual address:
+python tools/probe_receiver.py 192.168.1.100
+```
+
+The tool prompts for the current pairing code. Local success with a LAN timeout
+points toward a network/firewall issue. Success from another computer does not
+prove iOS has Local Network permission. The probe briefly pairs its own UDP socket;
+wait three seconds before starting the phone again.
+
+Receiver options:
 
 ```sh
 ./build/linux/phonemic --jitter-ms 5           # smaller buffer; less tolerance for Wi-Fi jitter

@@ -12,7 +12,9 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cerrno>
 #include <cmath>
+#include <cstring>
 #include <memory>
 #include <thread>
 
@@ -31,9 +33,32 @@ struct Sender {
     std::thread worker;
     std::atomic<float> peak{0};
     std::atomic<uint32_t> drops{0}, packets{0}, audioErrors{0}, sendErrors{0};
+    std::atomic<uint64_t> capturedFrames{0};
+    std::atomic<uint32_t> pingsSent{0}, receiveErrors{0}, datagramsReceived{0};
+    std::atomic<int> lastSocketError{0};
+    std::atomic<uint64_t> socketErrorNS{0};
+    uint64_t startedNS = nowNS(), lastErrorLogNS = 0;
     std::atomic<uint32_t> queueFrames{0}, underruns{0}, gaps{0}, late{0}, quantum{0}, received{0};
     std::atomic<uint64_t> pongNS{0};
     std::atomic<double> rttMS{0};
+    // Only the UDP worker calls this; no logging or socket work in RemoteIO.
+    void socketFailure(const char* operation, int code) {
+        uint64_t now = nowNS();
+        int previous = lastSocketError.exchange(code);
+        socketErrorNS = now;
+        if (previous != code || now - lastErrorLogNS >= 2000000000ULL) {
+            NSLog(@"PhoneMic UDP %s failed: %s (errno %d)", operation, std::strerror(code), code);
+            lastErrorLogNS = now;
+        }
+    }
+    bool transmit(const uint8_t* data, size_t size) {
+        ssize_t n = send(fd, data, size, 0);
+        if (n == ssize_t(size)) return true;
+        int code = n < 0 ? errno : EIO;
+        ++sendErrors;
+        socketFailure("send", code);
+        return false;
+    }
     ~Sender() {
         // Stop audio first: capture callback must finish before storage dies.
         if (unit) { AudioOutputUnitStop(unit); AudioUnitUninitialize(unit); AudioComponentInstanceDispose(unit); }
@@ -49,6 +74,7 @@ struct Sender {
         list.mBuffers[0] = {1, UInt32(n * sizeof(float)), s.capture.data()};
         OSStatus result = AudioUnitRender(s.unit, flags, time, 1, n, &list);
         if (result) { ++s.audioErrors; return result; }
+        s.capturedFrames.fetch_add(n, std::memory_order_relaxed);
         float peak = 0;
         for (UInt32 i = 0; i < n; ++i) peak = std::max(peak, std::abs(s.capture[i]));
         s.peak.store(peak, std::memory_order_relaxed);
@@ -75,22 +101,31 @@ struct Sender {
                     uint16_t bits = uint16_t(int16_t(std::lround(value * 32768)));
                     packet[32 + 2 * i] = bits & 255; packet[33 + 2 * i] = bits >> 8;
                 }
-                if (send(fd, packet.data(), packet.size(), 0) == ssize_t(packet.size())) ++packets;
-                else ++sendErrors;
+                if (transmit(packet.data(), packet.size())) ++packets;
             }
             uint64_t now = nowNS();
             if (now - lastPing > 500000000) {
                 std::array<uint8_t, pm::headerSize> ping{};
                 pm::encode(ping.data(), {pm::Type::ping, token, 0, now});
-                send(fd, ping.data(), ping.size(), 0); lastPing = now;
+                if (transmit(ping.data(), ping.size())) ++pingsSent;
+                lastPing = now;
             }
             for (int i = 0; i < 8; ++i) {
                 ssize_t n = recv(fd, response.data(), response.size(), 0);
-                if (n < 0) break;
+                if (n < 0) {
+                    int code = errno;
+                    if (code != EAGAIN && code != EWOULDBLOCK && code != EINTR) {
+                        ++receiveErrors; socketFailure("receive", code);
+                    }
+                    break;
+                }
+                ++datagramsReceived;
+                const uint64_t receivedNS = nowNS();
                 pm::Header h{};
                 if (pm::decode(response.data(), size_t(n), h) && h.type == pm::Type::pong &&
-                    h.token == token && h.time == lastPing && now >= h.time) {
-                    rttMS = double(now - h.time) / 1e6; pongNS = now;
+                    h.token == token && h.time == lastPing && receivedNS >= h.time) {
+                    if (!pongNS.load()) NSLog(@"PhoneMic received receiver acknowledgement");
+                    rttMS = double(receivedNS - h.time) / 1e6; pongNS = receivedNS;
                     queueFrames = pm::get32(response.data() + 32);
                     underruns = pm::get32(response.data() + 36); gaps = pm::get32(response.data() + 40);
                     late = pm::get32(response.data() + 44); quantum = pm::get32(response.data() + 48);
@@ -137,7 +172,15 @@ pm::CaptureRoute captureRoute(AVAudioSession* session) {
     setsockopt(s->fd, SOL_SOCKET, SO_SNDBUF, &sendBuffer, sizeof(sendBuffer));
     if (connect(s->fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0 ||
         fcntl(s->fd, F_SETFL, O_NONBLOCK) < 0) {
-        if (error) *error = failure(@"Cannot reach this address over Wi-Fi."); return NO;
+        int code = errno;
+        if (error) *error = failure([NSString stringWithFormat:@"Cannot reach %@:%u over Wi-Fi: %s (errno %d). Check Local Network permission and the PC's LAN address.", host, unsigned(port), std::strerror(code), code], code);
+        return NO;
+    }
+    sockaddr_in local{}; socklen_t localSize = sizeof(local);
+    if (getsockname(s->fd, reinterpret_cast<sockaddr*>(&local), &localSize) == 0) {
+        char localIP[INET_ADDRSTRLEN]{};
+        inet_ntop(AF_INET, &local.sin_addr, localIP, sizeof(localIP));
+        NSLog(@"PhoneMic UDP target %@:%u, local %s:%u, Wi-Fi interface index %u", host, unsigned(port), localIP, unsigned(ntohs(local.sin_port)), interface);
     }
     s->token = token;
     AVAudioSession* session = AVAudioSession.sharedInstance;
@@ -228,6 +271,11 @@ pm::CaptureRoute captureRoute(AVAudioSession* session) {
     uint64_t pong = s.pongNS.load();
     return @{@"peak": @(s.peak.load()), @"packets": @(s.packets.load()), @"drops": @(s.drops.load()),
              @"audioErrors": @(s.audioErrors.load()), @"sendErrors": @(s.sendErrors.load()),
+             @"receiveErrors": @(s.receiveErrors.load()), @"pingsSent": @(s.pingsSent.load()),
+             @"datagramsReceived": @(s.datagramsReceived.load()), @"capturedFrames": @(s.capturedFrames.load()),
+             @"socketErrno": @(s.lastSocketError.load()),
+             @"socketErrorAge": @((nowNS() - s.socketErrorNS.load()) / 1e9),
+             @"uptime": @((nowNS() - s.startedNS) / 1e9),
              @"connected": @(pong && nowNS() - pong < 3000000000ULL), @"rtt": @(s.rttMS.load()),
              @"queue": @(s.queueFrames.load() / 48.0), @"quantum": @(s.quantum.load()),
              @"underruns": @(s.underruns.load()), @"gaps": @(s.gaps.load()), @"late": @(s.late.load()),
