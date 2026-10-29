@@ -5,6 +5,10 @@ All multibyte **header and status integers are big-endian**. PCM payload is
 **little-endian signed 16-bit mono, 48,000 Hz**, with exactly 240 samples per packet.
 No native structs are sent over the wire.
 
+Pairing codes are eight hexadecimal digits (a nonzero random 32-bit value). The
+wire token field remains eight bytes for protocol compatibility: the upper four
+bytes are zero. For example, code `0123abcd` is encoded as `000000000123abcd`.
+
 | Offset | Bytes | Field |
 | --- | --- | --- |
 | 0 | 4 | ASCII `PMIC` |

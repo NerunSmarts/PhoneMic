@@ -15,13 +15,24 @@ Requires a running PipeWire user session (normal CachyOS desktop setup).
 
 ```sh
 sudo pacman -S --needed base-devel cmake pkgconf pipewire
-cmake -S . -B build/linux -DCMAKE_BUILD_TYPE=Release
-cmake --build build/linux --parallel
-ctest --test-dir build/linux --output-on-failure
-./build/linux/phonemic
+./build.sh --run
 ```
 
-The terminal prints a fresh 16-digit pairing code and listens on UDP port 5555.
+The script configures, builds, tests, and starts the receiver. It works from any
+working directory. For subsequent updates, stop the receiver with Ctrl-C and run:
+
+```sh
+./build.sh --update --run
+```
+
+`--update` pulls the current Git branch with `--ff-only`; omit it to build the
+checkout as it is. Without `--run`, the script only builds and tests. Receiver
+options go after `--`, for example `./build.sh --run -- --jitter-ms 5`.
+Dependencies are checked automatically; the script prints install instructions
+if anything is missing.
+
+The terminal prints a fresh **8-digit hex pairing code** and listens on UDP port 5555.
+When upgrading from the original 16-digit-code version, rebuild the iOS app too.
 Find your PC's LAN IPv4 address with `hostname -I` or `ip -4 addr`. Use the address
 on the same LAN as the phone, avoiding VPN, container, and loopback addresses.
 Enter that address and pairing code in the iOS app. Keep the terminal running.
@@ -97,7 +108,7 @@ Receiver options:
 ./build/linux/phonemic --jitter-ms 5           # smaller buffer; less tolerance for Wi-Fi jitter
 ./build/linux/phonemic --jitter-ms 20          # try this if the underrun counter increases
 ./build/linux/phonemic --bind 192.168.1.100 --port 5555
-./build/linux/phonemic --token 0123456789abcdef # optional fixed 16-digit hex pairing code
+./build/linux/phonemic --token 0123abcd         # optional fixed 8-digit hex pairing code
 ```
 
 The default jitter target is 10 ms; range 5–40 ms. The PipeWire node requests a
@@ -227,7 +238,7 @@ routing, and achieved latency still require a real iPhone + Linux test.
 
 ## Transport and privacy
 
-Pairing uses a random 64-bit bearer code printed by the receiver. Valid traffic
+Pairing uses a random 32-bit bearer code printed as eight hex digits by the receiver. Valid traffic
 locks the receiver to one sender endpoint until it has been idle for three seconds.
 The code filters accidental/unauthorized LAN senders; **it is sent in plaintext and
 is not encryption or cryptographic message authentication**. Use a trusted LAN.

@@ -8,7 +8,7 @@ from probe_receiver import probe
 
 class ProbeTests(unittest.TestCase):
     def test_udp_round_trip_ignores_unrelated_replies(self):
-        token = 0x0123456789ABCDEF
+        token = 0x0123ABCD
         failures = []
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as server:
             server.bind(("127.0.0.1", 0))
@@ -19,7 +19,7 @@ class ProbeTests(unittest.TestCase):
                     packet, peer = server.recvfrom(1024)
                     # Verify wire bytes against the protocol, not Python's unpacker.
                     self.assertEqual(packet[:24], bytes.fromhex(
-                        "504d4943 01 02 0000 0123456789abcdef 00000000 0000bb80"))
+                        "504d4943 01 02 0000 000000000123abcd 00000000 0000bb80"))
                     response = bytearray(packet)
                     response[5] = 3
                     response.extend(struct.pack("!6I", 480, 1, 2, 3, 128, 999))
@@ -52,6 +52,11 @@ class ProbeTests(unittest.TestCase):
             server.bind(("127.0.0.1", 0))
             with self.assertRaises(TimeoutError):
                 probe("127.0.0.1", server.getsockname()[1], 1, timeout=0.05)
+
+    def test_zero_and_oversize_pairing_tokens_are_rejected(self):
+        for token in [0, -1, 2**32, 0x123456789ABCDEF]:
+            with self.subTest(token=token), self.assertRaises(ValueError):
+                probe("127.0.0.1", 5555, token)
 
 
 if __name__ == "__main__":

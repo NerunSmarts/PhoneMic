@@ -27,6 +27,11 @@ static void protocol() {
     CHECK(!pm::decode(data.data(), 56, parsed));
     h.type = pm::Type::pong; pm::encode(data.data(), h);
     CHECK(pm::decode(data.data(), 56, parsed));
+    // Eight-digit codes retain the v1 eight-byte token field; leading zeroes
+    // must survive numeric parsing and the high half must stay zero.
+    h.type = pm::Type::ping; h.token = 0x0123abcd; pm::encode(data.data(), h);
+    CHECK(pm::get32(data.data() + 8) == 0 && pm::get32(data.data() + 12) == 0x0123abcd);
+    CHECK(pm::decode(data.data(), 32, parsed) && parsed.token == 0x0123abcd);
     const uint8_t low[] = {0, 128}, high[] = {255, 127};
     CHECK(pm::sample(low) == -1 && pm::sample(high) > 0.999f);
 }

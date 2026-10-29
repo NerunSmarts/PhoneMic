@@ -158,8 +158,8 @@ pm::CaptureRoute captureRoute(AVAudioSession* session) {
     [self stop];
     auto s = std::make_unique<Sender>();
     sockaddr_in address{}; address.sin_family = AF_INET; address.sin_port = htons(port);
-    if (!token || !port || inet_pton(AF_INET, host.UTF8String, &address.sin_addr) != 1) {
-        if (error) *error = failure(@"Enter the PC's Wi-Fi IPv4 address, port, and 16-digit pairing code.");
+    if (!token || token > UINT32_MAX || !port || inet_pton(AF_INET, host.UTF8String, &address.sin_addr) != 1) {
+        if (error) *error = failure(@"Enter the PC's Wi-Fi IPv4 address, port, and 8-digit pairing code.");
         return NO;
     }
     s->fd = socket(AF_INET, SOCK_DGRAM, 0);

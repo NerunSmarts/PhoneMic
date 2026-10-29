@@ -6,10 +6,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y cmake g++ pkg-config libpipewire-0.3-dev
-      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-      - run: cmake --build build --parallel
-      - run: ctest --test-dir build --output-on-failure
-      - run: ./build/phonemic --help
+      - run: ./build.sh
+      - run: ./build/linux/phonemic --token 0123abcd --help
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'

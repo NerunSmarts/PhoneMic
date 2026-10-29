@@ -122,7 +122,7 @@ int main(int argc, char** argv) {
             std::string arg = argv[i];
             if (arg == "--help") {
                 std::cout << "PhoneMic — Wi-Fi microphone → PipeWire virtual source\n"
-                          << "Usage: phonemic [--port 5555] [--jitter-ms 10] [--bind 0.0.0.0] [--token 16_HEX_DIGITS]\n"
+                          << "Usage: phonemic [--port 5555] [--jitter-ms 10] [--bind 0.0.0.0] [--token 8_HEX_DIGITS]\n"
                           << "Jitter range: 5–40 ms. Choose PhoneMic as your game's microphone.\n";
                 return 0;
             }
@@ -132,13 +132,18 @@ int main(int argc, char** argv) {
             else if (arg == "--jitter-ms") jitter = number(value, 5, 40);
             else if (arg == "--bind") bindAddress = value;
             else if (arg == "--token") {
-                if (std::strlen(value) != 16 || std::strspn(value, "0123456789abcdefABCDEF") != 16)
-                    throw std::runtime_error("Token must be exactly 16 hexadecimal digits");
+                if (std::strlen(value) != 8 || std::strspn(value, "0123456789abcdefABCDEF") != 8)
+                    throw std::runtime_error("Token must be exactly 8 hexadecimal digits");
                 token = std::strtoull(value, nullptr, 16);
                 if (!token) throw std::runtime_error("Token cannot be zero");
             } else throw std::runtime_error("Unknown option: " + arg);
         }
-        if (!token && getrandom(&token, sizeof(token), 0) != sizeof(token)) throw std::runtime_error("Cannot generate pairing token");
+        while (!token) {
+            uint32_t generated = 0;
+            if (getrandom(&generated, sizeof(generated), 0) != sizeof(generated))
+                throw std::runtime_error("Cannot generate pairing token");
+            token = generated;
+        }
         int fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
         if (fd < 0) throw std::runtime_error("Cannot create UDP socket");
         sockaddr_in address{}; address.sin_family = AF_INET; address.sin_port = htons(port);
@@ -177,7 +182,7 @@ int main(int argc, char** argv) {
             throw std::runtime_error("PipeWire stream connection failed");
         }
         std::cout << "PhoneMic receiver — UDP listening on " << bindAddress << ":" << port << "\nPairing code: "
-                  << std::hex << std::setfill('0') << std::setw(16) << token << std::dec << std::setfill(' ')
+                  << std::hex << std::setfill('0') << std::setw(8) << token << std::dec << std::setfill(' ')
                   << "\nJitter target: " << jitter << " ms. Find this PC's LAN IP with: hostname -I\n"
                   << "Select PhoneMic in your game/audio settings. Ctrl-C stops it.\n";
         std::thread worker(network, std::ref(r), fd, token);

@@ -61,8 +61,9 @@ final class MicrophoneModel: ObservableObject {
         message = nil
         let cleanCode = code.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let port = UInt16(port), port >= 1024,
-              cleanCode.count == 16, let token = UInt64(cleanCode, radix: 16), token != 0 else {
-            message = "Use a port from 1024–65535 and the receiver's 16-digit pairing code."
+              cleanCode.count == 8, cleanCode.allSatisfy({ $0.isHexDigit }),
+              let token = UInt64(cleanCode, radix: 16), token != 0 else {
+            message = "Use a port from 1024–65535 and the receiver's 8-digit pairing code."
             return
         }
         let allowed = await AVAudioApplication.requestRecordPermission()
@@ -168,7 +169,7 @@ struct MicrophoneView: View {
                         field("PC Wi-Fi IPv4 address", text: $host, placeholder: "192.168.1.100", keyboard: .decimalPad)
                         HStack(alignment: .top, spacing: 12) {
                             field("Port", text: $port, placeholder: "5555", keyboard: .numberPad).frame(width: 85)
-                            field("Pairing code", text: $code, placeholder: "16 hex digits", keyboard: .asciiCapable)
+                            field("Pairing code", text: $code, placeholder: "8 hex digits", keyboard: .asciiCapable)
                         }
                     }.disabled(model.running || model.starting || model.stopping)
 

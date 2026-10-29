@@ -15,8 +15,8 @@ STATUS = struct.Struct("!6I")
 
 def probe(host: str, port: int, token: int, timeout: float = 2.0) -> dict:
     ipaddress.IPv4Address(host)
-    if not 1024 <= port <= 65535 or not 0 < token < 2**64:
-        raise ValueError("Use a port from 1024–65535 and a nonzero 16-digit hexadecimal pairing code")
+    if not 1024 <= port <= 65535 or not 0 < token < 2**32:
+        raise ValueError("Use a port from 1024–65535 and a nonzero 8-digit hexadecimal pairing code")
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         sock.connect((host, port))
         started = time.monotonic_ns()
@@ -49,9 +49,9 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=5555)
     parser.add_argument("--token", help="Current receiver pairing code (otherwise prompted)")
     args = parser.parse_args()
-    code = (args.token or input("Receiver's current 16-digit pairing code: ")).strip()
-    if len(code) != 16:
-        parser.error("Pairing code must contain exactly 16 hexadecimal digits")
+    code = (args.token or input("Receiver's current 8-digit pairing code: ")).strip()
+    if len(code) != 8 or any(c not in "0123456789abcdefABCDEF" for c in code):
+        parser.error("Pairing code must contain exactly 8 hexadecimal digits")
     try:
         token = int(code, 16)
         result = probe(args.host, args.port, token)
