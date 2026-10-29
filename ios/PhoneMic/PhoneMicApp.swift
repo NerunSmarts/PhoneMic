@@ -2,13 +2,29 @@ import SwiftUI
 import AVFAudio
 import Combine
 
+// Explicit actor isolation keeps every bridge operation, including activation,
+// deactivation, and route queries, serialized on a background executor. Never
+// pass the bridge out of this actor or use detached tasks for individual calls.
+private actor AudioController {
+    private let bridge = AudioBridge()
+    func start(host: String, port: UInt16, token: UInt64) throws {
+        try bridge.start(withHost: host, port: port, token: token)
+    }
+    func stop() { bridge.stop() }
+    func snapshot() -> [String: NSNumber] { bridge.snapshot() }
+    func captureRouteIsValid() -> Bool { bridge.captureRouteIsValid() }
+}
+
 @MainActor
 final class MicrophoneModel: ObservableObject {
     @Published var running = false
     @Published var starting = false
+    @Published var stopping = false
     @Published var stats: [String: NSNumber] = [:]
     @Published var message: String?
-    private let audio = AudioBridge()
+    private let audio = AudioController()
+    private var generation = UUID()
+    private var refreshing = false
 
     func value(_ key: String) -> Double { stats[key]?.doubleValue ?? 0 }
     var connected: Bool { stats["connected"]?.boolValue ?? false }
@@ -16,9 +32,11 @@ final class MicrophoneModel: ObservableObject {
         value("input") + value("buffer") + 5 + value("rtt") / 2 + value("queue") + value("quantum") / 48
     }
     func start(host: String, port: String, code: String) async {
-        guard !running, !starting else { return }
+        guard !running, !starting, !stopping else { return }
+        let request = UUID()
+        generation = request
         starting = true
-        defer { starting = false }
+        defer { if generation == request { starting = false } }
         message = nil
         let cleanCode = code.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let port = UInt16(port), port >= 1024,
@@ -26,25 +44,55 @@ final class MicrophoneModel: ObservableObject {
             message = "Use a port from 1024–65535 and the receiver's 16-digit pairing code."
             return
         }
-        guard await AVAudioApplication.requestRecordPermission() else {
+        let allowed = await AVAudioApplication.requestRecordPermission()
+        // A call/Siri/media reset may have stopped us while permission or audio
+        // activation was in flight. Its later completion must not revive capture.
+        guard generation == request else { return }
+        guard allowed else {
             message = "Allow microphone access in Settings → Apps → PhoneMic."
             return
         }
         do {
-            try audio.start(withHost: host.trimmingCharacters(in: .whitespacesAndNewlines), port: port, token: token)
+            try await audio.start(host: host.trimmingCharacters(in: .whitespacesAndNewlines), port: port, token: token)
+            guard generation == request else { return }
             running = true
             UIApplication.shared.isIdleTimerDisabled = true
-            refresh()
-        } catch { message = error.localizedDescription }
+            await refresh()
+        } catch {
+            if generation == request { message = error.localizedDescription }
+        }
     }
-    func stop(reason: String? = nil) {
-        audio.stop()
+    func stop(reason: String? = nil) async {
+        guard !stopping else { return }
+        generation = UUID()
+        starting = false
+        stopping = true
         running = false
         stats = [:]
         UIApplication.shared.isIdleTimerDisabled = false
         if let reason { message = reason }
+        await audio.stop()
+        stopping = false
     }
-    func refresh() { if running { stats = audio.snapshot() } }
+    func refresh() async {
+        guard running, !refreshing else { return }
+        let request = generation
+        refreshing = true
+        defer { refreshing = false }
+        let snapshot = await audio.snapshot()
+        if running, generation == request { stats = snapshot }
+    }
+    func routeChanged(_ note: Notification) async {
+        guard running, !stopping else { return }
+        let request = generation
+        let reason = (note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? NSNumber)?.uintValue ?? 0
+        NSLog("PhoneMic route notification: reason=%lu", reason)
+        let valid = await audio.captureRouteIsValid()
+        guard running, generation == request else { return }
+        if !valid {
+            await stop(reason: "The microphone input changed or became unavailable. Tap Start to reconnect.")
+        }
+    }
 }
 
 @main
@@ -101,22 +149,24 @@ struct MicrophoneView: View {
                             field("Port", text: $port, placeholder: "5555", keyboard: .numberPad).frame(width: 85)
                             field("Pairing code", text: $code, placeholder: "16 hex digits", keyboard: .asciiCapable)
                         }
-                    }.disabled(model.running || model.starting)
+                    }.disabled(model.running || model.starting || model.stopping)
 
                     if let message = model.message {
                         Label(message, systemImage: "exclamationmark.circle")
                             .font(.callout).foregroundStyle(.orange)
                     }
                     Button {
-                        if model.running { model.stop() }
-                        else { Task { await model.start(host: host, port: port, code: code) } }
+                        Task {
+                            if model.running { await model.stop() }
+                            else { await model.start(host: host, port: port, code: code) }
+                        }
                     } label: {
-                        Label(model.starting ? "Starting…" : (model.running ? "Stop streaming" : "Start streaming"),
+                        Label(model.starting ? "Starting…" : (model.stopping ? "Stopping…" : (model.running ? "Stop streaming" : "Start streaming")),
                               systemImage: model.running ? "stop.fill" : "mic.fill")
                             .font(.headline).frame(maxWidth: .infinity).padding(.vertical, 12)
                     }
                     .buttonStyle(.borderedProminent).tint(model.running ? Color.red : accent)
-                    .foregroundStyle(model.running ? .white : .black).disabled(model.starting)
+                    .foregroundStyle(model.running ? .white : .black).disabled(model.starting || model.stopping)
 
                     if model.running { diagnostics }
                     Text("Use the same Wi-Fi network as your PC. Audio is sent directly over your LAN; use a trusted network.")
@@ -129,22 +179,19 @@ struct MicrophoneView: View {
                 Button("Setup", systemImage: "questionmark.circle") { showHelp = true }
             } }
             .sheet(isPresented: $showHelp) { help }
-            .onReceive(timer) { _ in model.refresh() }
-            .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.interruptionNotification)) { note in
-                if model.running,
+            .onReceive(timer) { _ in Task { await model.refresh() } }
+            .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.interruptionNotification).receive(on: DispatchQueue.main)) { note in
+                if model.running || model.starting,
                    let type = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
                    type == AVAudioSession.InterruptionType.began.rawValue {
-                    model.stop(reason: "Audio was interrupted. Tap Start to reconnect when ready.")
+                    Task { await model.stop(reason: "Audio was interrupted. Tap Start to reconnect when ready.") }
                 }
             }
-            .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.routeChangeNotification)) { note in
-                let reason = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt ?? 0
-                if model.running, [1, 2, 4, 8].contains(reason) {
-                    model.stop(reason: "The audio route changed. Tap Start to reconnect.")
-                }
+            .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.routeChangeNotification).receive(on: DispatchQueue.main)) { note in
+                Task { await model.routeChanged(note) }
             }
-            .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.mediaServicesWereResetNotification)) { _ in
-                model.stop(reason: "The audio service restarted. Tap Start to reconnect.")
+            .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.mediaServicesWereResetNotification).receive(on: DispatchQueue.main)) { _ in
+                Task { await model.stop(reason: "The audio service restarted. Tap Start to reconnect.") }
             }
         }.preferredColorScheme(.dark).tint(accent)
     }

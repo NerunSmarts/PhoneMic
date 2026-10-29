@@ -1,4 +1,5 @@
 #include "playout.hpp"
+#include "../../ios/PhoneMic/CaptureRoute.hpp"
 #include <cstdlib>
 #include <iostream>
 #include <thread>
@@ -72,7 +73,22 @@ static void drift(double inputRate) {
     }
     CHECK(p.underruns <= 2); CHECK(p.trims == 0);
 }
+static void captureRouteChanges() {
+    const pm::CaptureRoute recording{{"built-in-mic"}, 48000, 1};
+    // Regression: delayed activation / preferred-input notifications, or a
+    // speaker/headphone-only change, must not shut down an unchanged microphone.
+    CHECK(recording.canContinueWith({{"built-in-mic"}, 48000, 1}));
+    // Preserve genuine disconnect/format-change handling, including reason 7
+    // (no suitable route), which the old reason-number whitelist missed.
+    CHECK(!recording.canContinueWith({{}, 48000, 1}));
+    CHECK(!recording.canContinueWith({{"usb-mic"}, 48000, 1}));
+    CHECK(!recording.canContinueWith({{"built-in-mic"}, 44100, 1}));
+    CHECK(!recording.canContinueWith({{"built-in-mic"}, 48000, 2}));
+    CHECK(!recording.canContinueWith({{"built-in-mic"}, 0, 0}));
+    const pm::CaptureRoute inactive;
+    CHECK(!inactive.canContinueWith(inactive));
+}
 int main() {
-    protocol(); ring(); playout(); drift(1.0002); drift(0.9998);
-    std::cout << "Protocol validation, concurrent SPSC, loss/wrap/recovery, and ±200 ppm drift passed.\n";
+    protocol(); ring(); playout(); drift(1.0002); drift(0.9998); captureRouteChanges();
+    std::cout << "Protocol, concurrent SPSC, loss/wrap/recovery, ±200 ppm drift, and capture route regressions passed.\n";
 }

@@ -1,6 +1,7 @@
 #import "AudioBridge.h"
 #import <AVFoundation/AVFoundation.h>
 #import <AudioToolbox/AudioToolbox.h>
+#include "CaptureRoute.hpp"
 #include "protocol.hpp"
 #include "ring.hpp"
 #include <arpa/inet.h>
@@ -103,10 +104,19 @@ struct Sender {
 NSError* failure(NSString* message, NSInteger code = -1) {
     return [NSError errorWithDomain:@"PhoneMic" code:code userInfo:@{NSLocalizedDescriptionKey: message}];
 }
+pm::CaptureRoute captureRoute(AVAudioSession* session) {
+    pm::CaptureRoute route;
+    for (AVAudioSessionPortDescription* input in session.currentRoute.inputs)
+        route.inputIDs.emplace_back(input.UID.UTF8String);
+    route.sampleRate = session.sampleRate;
+    route.channels = uint32_t(session.inputNumberOfChannels);
+    return route;
+}
 }
 
 @implementation AudioBridge {
     std::unique_ptr<Sender> _sender;
+    pm::CaptureRoute _captureRoute;
     double _inputMS, _bufferMS;
 }
 - (BOOL)startWithHost:(NSString*)host port:(uint16_t)port token:(uint64_t)token error:(NSError**)error {
@@ -135,14 +145,22 @@ NSError* failure(NSString* message, NSInteger code = -1) {
         ![session setPreferredSampleRate:48000 error:error] ||
         ![session setPreferredIOBufferDuration:0.005 error:error] ||
         ![session setActive:YES error:error]) return NO;
-    // Keep Bluetooth processing / latency out of the signal path.
+    // Avoid a redundant route reconfiguration when the built-in mic is already
+    // selected. Activation can itself post route-change notifications.
+    bool foundBuiltInMic = false;
     for (AVAudioSessionPortDescription* input in session.availableInputs) {
         if ([input.portType isEqualToString:AVAudioSessionPortBuiltInMic]) {
-            if (![session setPreferredInput:input error:error]) {
+            foundBuiltInMic = true;
+            if (![session.currentRoute.inputs.firstObject.UID isEqualToString:input.UID] &&
+                ![session setPreferredInput:input error:error]) {
                 [session setActive:NO error:nil]; return NO;
             }
             break;
         }
+    }
+    if (!foundBuiltInMic) {
+        if (error) *error = failure(@"The built-in microphone is unavailable.");
+        [session setActive:NO error:nil]; return NO;
     }
     _inputMS = session.inputLatency * 1000; _bufferMS = session.IOBufferDuration * 1000;
     AudioComponentDescription desc{};
@@ -171,6 +189,11 @@ NSError* failure(NSString* message, NSInteger code = -1) {
         if (error) *error = failure([NSString stringWithFormat:@"Microphone setup failed (%d).", int(status)], status);
         s.reset(); [session setActive:NO error:nil]; return NO;
     }
+    _captureRoute = captureRoute(session);
+    if (!_captureRoute.usable()) {
+        if (error) *error = failure(@"No usable microphone input route is available. Try again after the audio interruption ends.");
+        s.reset(); [session setActive:NO error:nil]; return NO;
+    }
     s->running = true;
     Sender* ptr = s.get();
     s->worker = std::thread([ptr] {
@@ -185,9 +208,22 @@ NSError* failure(NSString* message, NSInteger code = -1) {
         _sender.reset();
         [AVAudioSession.sharedInstance setActive:NO withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation error:nil];
     }
+    _captureRoute = {};
+}
+- (BOOL)captureRouteIsValid {
+    if (!_sender) return NO;
+    AVAudioSession* session = AVAudioSession.sharedInstance;
+    const auto current = captureRoute(session);
+    const bool valid = _captureRoute.canContinueWith(current);
+    NSLog(@"PhoneMic route check: input=%@ rate=%.0f channels=%u, %@",
+          session.currentRoute.inputs.firstObject.portType ?: @"none", current.sampleRate,
+          current.channels, valid ? @"capture unchanged" : @"capture changed");
+    return valid;
 }
 - (NSDictionary<NSString*, NSNumber*>*)snapshot {
     if (!_sender) return @{};
+    AVAudioSession* session = AVAudioSession.sharedInstance;
+    _inputMS = session.inputLatency * 1000; _bufferMS = session.IOBufferDuration * 1000;
     auto& s = *_sender;
     uint64_t pong = s.pongNS.load();
     return @{@"peak": @(s.peak.load()), @"packets": @(s.packets.load()), @"drops": @(s.drops.load()),

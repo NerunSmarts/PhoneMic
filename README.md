@@ -79,8 +79,11 @@ xcodegen generate --spec ios/project.yml
 
 The app uses the built-in microphone, requests a 5 ms hardware I/O period, and
 disables voice processing via measurement mode. Audio runs in the background and
-with the screen locked; calls, Siri, and route changes can interrupt it. Tap Start
-again after an interruption. The screen stays awake while streaming in the foreground.
+with the screen locked; calls, Siri, input-device changes, and input-format changes
+can interrupt it. Normal session-configuration notifications and output-only route
+changes do not stop an unchanged microphone. Tap Start again after an interruption.
+Session activation/deactivation and route checks run on a dedicated serial actor,
+off the UI thread. The screen stays awake while streaming in the foreground.
 Bluetooth microphone paths are deliberately avoided.
 
 The level meter, RTT, receiver queue, actual graph quantum, packet gaps, and
