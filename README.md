@@ -4,17 +4,42 @@ An iOS microphone sender and CachyOS / PipeWire receiver for rhythm games. Nativ
 RemoteIO capture → 5 ms UDP PCM packets → a selectable **PhoneMic** virtual microphone.
 No server, codec, subscription, or internet connection is needed at runtime.
 
-**Under 50 ms is the design target, not a measured guarantee.** Real latency depends
-on the phone, Wi-Fi, PipeWire graph, and game's input buffers. A calibration tool
-measures the PC-speaker → iPhone → virtual-microphone acoustic loop. This repository
-has not yet been measured on a physical iPhone connected to CachyOS.
+One iPhone/CachyOS setup has reported **~28 ms E2E latency while playing YARG**.
+Real latency depends on the phone, Wi-Fi, PipeWire graph, and game's input buffers.
+A calibration tool measures the PC-speaker → iPhone → virtual-microphone acoustic loop.
 
 ## CachyOS receiver
 
 Requires a running PipeWire user session (normal CachyOS desktop setup).
 
+For a background receiver with your own persistent pairing code:
+
 ```sh
 sudo pacman -S --needed base-devel cmake pkgconf pipewire
+./build.sh --install-service -- --token 0123abcd
+```
+
+Choose any nonzero eight-digit hex code and enter it in the phone once. The service
+starts now and at login, and keeps running without a terminal. Run the script as
+your desktop user; `sudo` is only needed for the dependency installation above.
+Omit `--token` to generate and save a code once. Existing settings survive updates.
+
+```sh
+./build.sh --update --install-service          # one-command service update
+./service.sh configure --token a1b2c3d4         # change code and restart
+./service.sh configure --jitter-ms 5           # other settings stay intact
+./service.sh settings
+./service.sh status
+./service.sh logs
+```
+
+Settings live in `~/.config/phonemic/receiver.conf` (or under `XDG_CONFIG_HOME`).
+See the [service guide](docs/service.md) for all commands, file format, and packaged
+installs. Stop any foreground receiver before installing the service.
+
+For foreground use instead:
+
+```sh
 ./build.sh --run
 ```
 
@@ -31,7 +56,9 @@ options go after `--`, for example `./build.sh --run -- --jitter-ms 5`.
 Dependencies are checked automatically; the script prints install instructions
 if anything is missing.
 
-The terminal prints a fresh **8-digit hex pairing code** and listens on UDP port 5555.
+The receiver prints its **8-digit hex pairing code** and listens on UDP port 5555.
+It loads the settings file if present; a fresh random code is used only when no
+code/file is supplied. The background service always uses its saved code.
 When upgrading from the original 16-digit-code version, rebuild the iOS app too.
 Find your PC's LAN IPv4 address with `hostname -I` or `ip -4 addr`. Use the address
 on the same LAN as the phone, avoiding VPN, container, and loopback addresses.
@@ -81,7 +108,7 @@ errors. Keyboard / PointerUI diagnostics do not establish a UDP failure.
 The receiver separately shows `UDP` (all datagrams), `wrong-code`, `malformed`,
 `other-sender`, and `reply-errors` counters. If `UDP` stays zero, check the address,
 firewall, and Wi-Fi client isolation. If `wrong-code` grows, stop streaming and copy
-the code from the current receiver process; it changes on every receiver restart.
+the current code; saved codes persist, while unsaved random codes change on restart.
 `other-sender` means another endpoint is paired: stop both clients and wait three
 seconds. Local Network permission controls are in iOS Settings → Privacy & Security
 → Local Network when iOS has registered a request. No general API can read or reset
@@ -155,7 +182,7 @@ The level meter, RTT, receiver queue, actual graph quantum, packet gaps, and
 underruns help tune the setup. A LIVE indicator confirms a matching receiver
 responded; the game must still open the virtual microphone separately. If it stays
 at “Waiting,” check the pairing code, address, firewall, and iOS Settings → Apps →
-PhoneMic → Local Network. If the receiver restarts, copy its new code into the app.
+PhoneMic → Local Network. With a saved code, reconnects do not require re-entering it.
 
 ## Acoustic latency calibration
 

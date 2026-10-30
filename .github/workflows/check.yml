@@ -5,7 +5,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y cmake g++ pkg-config libpipewire-0.3-dev
+      - run: sudo apt-get update && sudo apt-get install -y cmake g++ pkg-config libpipewire-0.3-dev pipewire wireplumber dbus-user-session
       - run: ./build.sh
       - run: ./build/linux/phonemic --token 0123abcd --help
       - uses: actions/setup-python@v5
@@ -13,3 +13,12 @@ jobs:
           python-version: '3.12'
       - run: pip install -r tools/requirements.txt
       - run: python -m unittest discover -s tools -p 'test_*.py' -v
+      - name: Start the test account's systemd user manager
+        run: |
+          sudo systemctl start "user@$(id -u).service"
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
+      - name: Test the background service with real PipeWire and UDP
+        env:
+          PHONEMIC_SERVICE_TEST: '1'
+        run: ./tools/test_service.sh

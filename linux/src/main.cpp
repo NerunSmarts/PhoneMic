@@ -1,4 +1,5 @@
 #include "playout.hpp"
+#include "config.hpp"
 #include <pipewire/pipewire.h>
 #include <spa/param/audio/format-utils.h>
 #include <arpa/inet.h>
@@ -26,7 +27,8 @@ struct Receiver {
     std::atomic<bool> running{true};
     std::atomic<uint32_t> quantum{0};
     bool failed = false;
-    explicit Receiver(size_t jitter) : audio(jitter) {}
+    bool quiet = false;
+    explicit Receiver(size_t jitter, bool quietMode) : audio(jitter), quiet(quietMode) {}
 };
 
 static void process(void* userdata) {
@@ -96,7 +98,11 @@ static void network(Receiver& r, int fd, uint64_t token) {
             }
         };
         if (result > 0 && (pfd.revents & POLLIN)) receiveOne();
-        if (Clock::now() - lastPrint >= std::chrono::seconds(2)) {
+        if (paired && Clock::now() - lastPeer >= std::chrono::seconds(3)) {
+            paired = false;
+            std::cout << "\nPhone disconnected; waiting for a connection.\n";
+        }
+        if (!r.quiet && Clock::now() - lastPrint >= std::chrono::seconds(2)) {
             std::cout << "\r" << (paired && Clock::now() - lastPeer < std::chrono::seconds(3) ? "Receiving" : "Waiting  ")
                       << " | queue " << std::fixed << std::setprecision(1) << r.audio.queued() / 48.0
                       << " ms | quantum " << r.quantum.load() << " | gaps " << r.audio.lost.load()
@@ -108,41 +114,61 @@ static void network(Receiver& r, int fd, uint64_t token) {
         }
     }
 }
-static unsigned number(const char* value, unsigned low, unsigned high) {
-    char* end = nullptr; unsigned long n = std::strtoul(value, &end, 10);
-    if (!*value || *end || n < low || n > high) throw std::runtime_error("Invalid numeric option");
-    return unsigned(n);
+static void saveConfig(const std::string& destination, const pm::ReceiverConfig& config) {
+    const std::filesystem::path path(destination);
+    if (!path.parent_path().empty()) std::filesystem::create_directories(path.parent_path());
+    std::string temporary = destination + ".XXXXXX";
+    // mkstemp creates a private 0600 file. Rename only after the complete config
+    // has been written, so an update never destroys the old working settings.
+    int fd = mkstemp(temporary.data());
+    if (fd < 0) throw std::runtime_error("Cannot create config: " + destination);
+    const auto contents = pm::formatConfig(config);
+    size_t written = 0;
+    while (written < contents.size()) {
+        auto n = write(fd, contents.data() + written, contents.size() - written);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) { close(fd); unlink(temporary.c_str()); throw std::runtime_error("Cannot write config"); }
+        written += size_t(n);
+    }
+    int flushed = fsync(fd);
+    int closed = close(fd);
+    if (flushed < 0 || closed < 0 || rename(temporary.c_str(), destination.c_str()) < 0) {
+        unlink(temporary.c_str()); throw std::runtime_error("Cannot save config: " + destination);
+    }
 }
 int main(int argc, char** argv) {
-    unsigned port = 5555, jitter = 10;
-    std::string bindAddress = "0.0.0.0";
-    uint64_t token = 0;
+    std::cout << std::unitbuf;
+    pm::ReceiverOptions options;
     try {
-        for (int i = 1; i < argc; ++i) {
-            std::string arg = argv[i];
-            if (arg == "--help") {
-                std::cout << "PhoneMic — Wi-Fi microphone → PipeWire virtual source\n"
-                          << "Usage: phonemic [--port 5555] [--jitter-ms 10] [--bind 0.0.0.0] [--token 8_HEX_DIGITS]\n"
-                          << "Jitter range: 5–40 ms. Choose PhoneMic as your game's microphone.\n";
-                return 0;
-            }
-            if (i + 1 == argc) throw std::runtime_error("Missing value for " + arg);
-            const char* value = argv[++i];
-            if (arg == "--port") port = number(value, 1024, 65535);
-            else if (arg == "--jitter-ms") jitter = number(value, 5, 40);
-            else if (arg == "--bind") bindAddress = value;
-            else if (arg == "--token") {
-                if (std::strlen(value) != 8 || std::strspn(value, "0123456789abcdefABCDEF") != 8)
-                    throw std::runtime_error("Token must be exactly 8 hexadecimal digits");
-                token = std::strtoull(value, nullptr, 16);
-                if (!token) throw std::runtime_error("Token cannot be zero");
-            } else throw std::runtime_error("Unknown option: " + arg);
+        options = pm::receiverOptions(std::vector<std::string>(argv + 1, argv + argc), pm::defaultConfigPath());
+        if (options.help) {
+            std::cout << "PhoneMic — Wi-Fi microphone → PipeWire virtual source\n"
+                      << "Usage: phonemic [--port 5555] [--jitter-ms 10] [--bind 0.0.0.0] [--token 8_HEX_DIGITS]\n"
+                      << "                [--config FILE | --no-config] [--quiet] [--check-config | --save-config FILE]\n"
+                      << "Defaults load from $XDG_CONFIG_HOME/phonemic/receiver.conf (or ~/.config/phonemic/receiver.conf).\n"
+                      << "CLI options override the settings file. Without a file/code, pairing is random.\n"
+                      << "--check-config validates and prints settings without opening audio or network sockets.\n"
+                      << "--save-config persists effective settings and an initial fixed code without starting audio.\n"
+                      << "Jitter range: 5–40 ms. Choose PhoneMic as your game's microphone.\n";
+            return 0;
         }
+    } catch (const std::exception& error) { std::cerr << "PhoneMic configuration: " << error.what() << '\n'; return 2; }
+    auto& config = options.config;
+    auto& token = config.token;
+    const auto port = config.port, jitter = config.jitter;
+    const auto& bindAddress = config.bindAddress;
+    try {
+        if (options.check) { std::cout << pm::formatConfig(config); return 0; }
         while (!token) {
             uint32_t generated = 0;
             if (getrandom(&generated, sizeof(generated), 0) != sizeof(generated))
                 throw std::runtime_error("Cannot generate pairing token");
             token = generated;
+        }
+        if (!options.savePath.empty()) {
+            saveConfig(options.savePath, config);
+            std::cout << "Saved settings to " << options.savePath << '\n' << pm::formatConfig(config);
+            return 0;
         }
         int fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
         if (fd < 0) throw std::runtime_error("Cannot create UDP socket");
@@ -154,7 +180,7 @@ int main(int argc, char** argv) {
         int receiveBuffer = 64 * 1024;
         setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &receiveBuffer, sizeof(receiveBuffer));
         pw_init(nullptr, nullptr);
-        Receiver r(jitter * 48);
+        Receiver r(jitter * 48, options.quiet);
         r.loop = pw_main_loop_new(nullptr);
         if (!r.loop) { close(fd); throw std::runtime_error("Cannot create PipeWire loop"); }
         pw_loop_add_signal(pw_main_loop_get_loop(r.loop), SIGINT, quit, &r);

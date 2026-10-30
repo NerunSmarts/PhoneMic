@@ -1,0 +1,16 @@
+[Unit]
+Description=PhoneMic Wi-Fi microphone receiver
+Wants=pipewire.service
+After=pipewire.service
+PartOf=pipewire.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+ExecStart=@PHONEMIC_EXECUTABLE@ --config @PHONEMIC_CONFIG@ --quiet
+Restart=on-failure
+RestartSec=3
+RestartPreventExitStatus=2
+
+[Install]
+WantedBy=default.target

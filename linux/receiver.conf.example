@@ -1,0 +1,5 @@
+# Choose any nonzero eight-digit hexadecimal code, and enter it in the iOS app.
+pairing_code=0123abcd
+port=5555
+jitter_ms=10
+bind_address=0.0.0.0
