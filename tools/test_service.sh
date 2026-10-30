@@ -19,7 +19,10 @@ export XDG_DATA_HOME="$task_temp/data with spaces % \$"
 task_config="$XDG_CONFIG_HOME/phonemic/receiver.conf"
 cleanup() {
   local task_result=$?
-  if ((task_result)); then journalctl --user -u phonemic.service -n 80 --no-pager || true; fi
+  if ((task_result)); then
+    systemctl --user show phonemic.service --property=ExecStart || true
+    journalctl --user -u phonemic.service -n 80 --no-pager || true
+  fi
   ./service.sh uninstall || true
   rm -rf -- "$task_temp"
   exit "$task_result"
@@ -28,10 +31,11 @@ trap cleanup EXIT
 wait_for_receiver() {
   local task_token="$1" task_port="$2"
   local task_deadline=$((SECONDS + 20))
-  until python3 tools/probe_receiver.py 127.0.0.1 --port "$task_port" --token "$task_token"; do
-    if ((SECONDS >= task_deadline)); then return 1; fi
+  until python3 tools/probe_receiver.py 127.0.0.1 --port "$task_port" --token "$task_token" > "$task_temp/probe.log" 2>&1; do
+    if ((SECONDS >= task_deadline)); then cat "$task_temp/probe.log"; return 1; fi
     sleep 0.2
   done
+  cat "$task_temp/probe.log"
   python3 - <<'PY'
 import json, subprocess, time
 deadline = time.monotonic() + 10

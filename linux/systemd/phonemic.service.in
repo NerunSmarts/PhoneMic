@@ -7,7 +7,7 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=exec
-ExecStart=@PHONEMIC_EXECUTABLE@ --config @PHONEMIC_CONFIG@ --quiet
+ExecStart=:@PHONEMIC_EXECUTABLE@ --config @PHONEMIC_CONFIG@ --quiet
 Restart=on-failure
 RestartSec=3
 RestartPreventExitStatus=2

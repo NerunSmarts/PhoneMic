@@ -87,14 +87,13 @@ save_settings() {
   printf 'Settings saved: %s\n' "$task_config"
 }
 
-# systemd parses ExecStart itself: quote paths, escape specifiers and dollar
-# expansion, and never pass settings through a shell or source the config file.
+# systemd parses ExecStart itself. Its ':' prefix disables dollar expansion;
+# quote paths and escape '%' specifiers without invoking a shell.
 unit_path() {
   local task_value="$1"
   task_value="${task_value//\\/\\\\}"
   task_value="${task_value//\"/\\\"}"
   task_value="${task_value//%/%%}"
-  task_value="${task_value//\$/\$\$}"
   printf '"%s"' "$task_value"
 }
 
@@ -113,7 +112,7 @@ case "$task_command" in
     install -m755 -- "$task_build_binary" "$task_binary_temp"
     while IFS= read -r task_line || [[ -n "$task_line" ]]; do
       case "$task_line" in
-        ExecStart=*) printf 'ExecStart=%s --config %s --quiet\n' "$(unit_path "$task_binary")" "$(unit_path "$task_config")" ;;
+        ExecStart=*) printf 'ExecStart=:%s --config %s --quiet\n' "$(unit_path "$task_binary")" "$(unit_path "$task_config")" ;;
         *) printf '%s\n' "$task_line" ;;
       esac
     done < "$task_root/linux/systemd/phonemic.service.in" > "$task_unit_temp"
